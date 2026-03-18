@@ -3851,6 +3851,13 @@ def calculate_subwatershed_boundary(
             os.path.dirname(target_watershed_boundary_vector_path)))
     discovery_time_raster_path = os.path.join(workspace_dir, 'discovery.tif')
     finish_time_raster_path = os.path.join(workspace_dir, 'finish.tif')
+    boundary_raster_path = os.path.join(workspace_dir, 'boundary.tif')
+
+    pygeoprocessing.new_raster_from_base(
+        d8_flow_dir_raster_path_band[0], boundary_raster_path,
+        gdal.GDT_Float64, [-1])
+    boundary_managed_raster = ManagedRaster(
+        boundary_raster_path.encode('utf-8'), 1, True)
 
     # construct the discovery/finish time rasters for fast individual cell
     # watershed detection
@@ -4009,6 +4016,7 @@ def calculate_subwatershed_boundary(
     cdef int _int_max_steps_per_watershed = max_steps_per_watershed
 
     for index, (stream_fid, x_l, y_l) in enumerate(visit_order_stack):
+        print('FID', stream_fid)
         if ctime(NULL) - last_log_time > _LOGGING_PERIOD:
             LOGGER.info(
                 f'(calculate_subwatershed_boundary): watershed building '
@@ -4019,7 +4027,7 @@ def calculate_subwatershed_boundary(
         # a previously calculated watershed.
         if discovery == -1:
             continue
-            
+
         # keep a list of pixels that are within the watershed along the boundary
         # these will later be filled in with -1 in the discovery raster
         boundary_list = [(x_l, y_l)]
@@ -4069,79 +4077,148 @@ def calculate_subwatershed_boundary(
                 x_l += COL_OFFSETS[edge_dir]
                 y_l += ROW_OFFSETS[edge_dir]
                 # note the pixel moved
+                print(f'adding current pixel {x_l}, {y_l} to boundary')
                 boundary_list.append((x_l, y_l))
+
+        print(f'starting from pixel {x_l}, {y_l}, vertex {x_f}, {y_f}, edge side {edge_side}, edge dir {edge_dir}')
 
         n_steps = 0
         terminated_early = 0
-        while True:
-            # step the edge then determine the projected coordinates
-            x_f += COL_OFFSETS[edge_dir]
-            y_f += ROW_OFFSETS[edge_dir]
-            delta_x += COL_OFFSETS[edge_dir]
-            delta_y += ROW_OFFSETS[edge_dir]
-            # equivalent to gdal.ApplyGeoTransform(geotransform, x_f, y_f)
-            # to eliminate python function call overhead
-            x_p = g0 + g1*x_f + g2*y_f
-            y_p = g3 + g4*x_f + g5*y_f
-            watershed_boundary.AddPoint(x_p, y_p)
-            n_steps += 1
-            if n_steps > _int_max_steps_per_watershed:
-                LOGGER.warning('quitting, too many steps')
-                terminated_early = 1
-                break
-            if x_l < 0 or y_l < 0 or x_l >= n_cols or y_l >= n_rows:
-                # This is unexpected but worth checking since missing this
-                # error would be very difficult to debug.
-                raise RuntimeError(
-                    f'{x_l}, {y_l} out of bounds for '
-                    f'{n_cols}x{n_rows} raster.')
-            if edge_side - ((edge_dir-2) % 8) == 0:
-                # counterclockwise configuration
-                left = edge_dir
-                right = (left-1) % 8
-                out_dir_increase = 2
-            else:
-                # clockwise configuration (swapping "left" and "right")
-                right = edge_dir
-                left = (edge_side+1)
-                out_dir_increase = -2
-            left_in = _in_watershed(
-                x_l, y_l, left, discovery, finish, n_cols, n_rows,
-                discovery_managed_raster, discovery_nodata)
-            right_in = _in_watershed(
-                x_l, y_l, right, discovery, finish, n_cols, n_rows,
-                discovery_managed_raster, discovery_nodata)
-            if right_in:
-                # turn right
-                out_dir = edge_side
-                edge_side = (edge_side-out_dir_increase) % 8
-                edge_dir = out_dir
-                # pixel moves to be the right cell
-                x_l += COL_OFFSETS[right]
-                y_l += ROW_OFFSETS[right]
-                _diagonal_fill_step(
-                    x_l, y_l, right,
-                    discovery, finish, discovery_managed_raster,
-                    discovery_nodata,
-                    boundary_list)
-            elif left_in:
-                # step forward
-                x_l += COL_OFFSETS[edge_dir]
-                y_l += ROW_OFFSETS[edge_dir]
-                # the pixel moves forward
-                boundary_list.append((x_l, y_l))
-            else:
-                # turn left
-                edge_side = edge_dir
-                edge_dir = (edge_side + out_dir_increase) % 8
+        geoms = []
+        
+        starting_points = [((x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir, 'left')]
+        all_starting_points = set((x_f, y_f))
 
-            if delta_x == 0 and delta_y == 0:
-                # met the start point so we completed the watershed loop
-                break
+        while starting_points:
+            (x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir, orientation = starting_points.pop()
+            starting_point = (x_f, y_f)
+            starting_dir = edge_dir
+            vertices = [(x_p, y_p)]
+            print('starting from', (x_l, y_l), (x_f, y_f), edge_side, edge_dir, orientation)
+
+            while True:
+                # step the edge then determine the projected coordinates
+                x_f += COL_OFFSETS[edge_dir]
+                y_f += ROW_OFFSETS[edge_dir]
+
+                delta_x += COL_OFFSETS[edge_dir]
+                delta_y += ROW_OFFSETS[edge_dir]
+
+                # equivalent to gdal.ApplyGeoTransform(geotransform, x_f, y_f)
+                # to eliminate python function call overhead
+                x_p = g0 + g1*x_f + g2*y_f
+                y_p = g3 + g4*x_f + g5*y_f
+                watershed_boundary.AddPoint(x_p, y_p)
+                vertices.append((x_p, y_p))
+
+                # boundary_list.append((x_l, y_l))
+
+                n_steps += 1
+                if n_steps > _int_max_steps_per_watershed:
+                    LOGGER.warning('quitting, too many steps')
+                    terminated_early = 1
+                    break
+                if x_l < 0 or y_l < 0 or x_l >= n_cols or y_l >= n_rows:
+                    # This is unexpected but worth checking since missing this
+                    # error would be very difficult to debug.
+                    raise RuntimeError(
+                        f'{x_l}, {y_l} out of bounds for '
+                        f'{n_cols}x{n_rows} raster.')
+
+
+                if edge_side - ((edge_dir-2) % 8) == 0:
+                    # counterclockwise configuration
+                    left = edge_dir
+                    right = (left - 1) % 8
+                    out_dir_increase = 2
+                else:
+                    # clockwise configuration (swapping "left" and "right")
+                    right = edge_dir
+                    left = (right + 1) % 8
+                    out_dir_increase = -2
+                left_in = _in_watershed(
+                    x_l, y_l, left, discovery, finish, n_cols, n_rows,
+                    discovery_managed_raster, discovery_nodata)
+                right_in = _in_watershed(
+                    x_l, y_l, right, discovery, finish, n_cols, n_rows,
+                    discovery_managed_raster, discovery_nodata)
+                print('left', left, left_in)
+                print('right', right, right_in)
+
+                if orientation == 'left':
+                    if right_in and left_in:
+                        print(f'turn right, move pixel to {right}')
+                        # turn right
+                        out_dir = edge_side
+                        edge_side = (edge_side - out_dir_increase) % 8
+                        edge_dir = out_dir
+                        
+                        # add both left and right to the boundary
+                        # so that the boundary is a continuous border of pixels that share a side
+                        boundary_list.append((x_l + COL_OFFSETS[left], y_l + ROW_OFFSETS[left]))
+                        boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+
+                        # pixel moves to be the right cell
+                        x_l += COL_OFFSETS[right]
+                        y_l += ROW_OFFSETS[right]
+
+                    elif left_in and not right_in:
+                        print(f'go straight, move pixel to {edge_dir}')
+                        # step forward
+                        x_l += COL_OFFSETS[edge_dir]
+                        y_l += ROW_OFFSETS[edge_dir]
+                        # the pixel moves forward
+                        boundary_list.append((x_l, y_l))
+
+                    elif right_in and not left_in:  # continue straight and swap orientation
+                        print(f'turn left and push point to stack')
+                        # turn left
+                        edge_side = edge_dir
+                        edge_dir = (edge_side + out_dir_increase) % 8
+
+                        point = (
+                            (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]),
+                            (x_f, y_f),
+                            (x_p, y_p),
+                            (edge_side + 4) % 8,
+                            (edge_dir + 4) % 8,
+                            'left'
+                        )
+                        print('pushing', point)
+
+                        if (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]) not in all_starting_points:
+                            starting_points.append(point)
+                            all_starting_points.add((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+                        boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+
+                    else:
+                        print('turn left')
+                        # turn left
+                        edge_side = edge_dir
+                        edge_dir = (edge_side + out_dir_increase) % 8
+
+
+                if (x_f, y_f) == starting_point and edge_dir == starting_dir:
+                    geoms.append(shapely.Polygon(vertices))
+                    break
+
+                if delta_x == 0 and delta_y == 0:
+                    break
+
+
+                print(f'pixel: ({x_l}, {y_l}), vertex: ({x_f}, {y_f}), edge side: {edge_side}, edge dir: {edge_dir}')
+
+                
+
+        print(stream_fid, 'geoms:', len(geoms))
+
+        watershed_polygon = shapely.Polygon()
+        for geom in geoms:
+            watershed_polygon = shapely.union(watershed_polygon, geom)
 
         watershed_feature = ogr.Feature(watershed_layer.GetLayerDefn())
-        watershed_polygon = ogr.Geometry(ogr.wkbPolygon)
-        watershed_polygon.AddGeometry(watershed_boundary)
+        watershed_polygon = ogr.CreateGeometryFromWkb(watershed_polygon.wkb)
+        print(watershed_polygon)
         watershed_feature.SetGeometry(watershed_polygon)
         watershed_feature.SetField('stream_fid', stream_fid)
         watershed_feature.SetField('terminated_early', terminated_early)
@@ -4153,6 +4230,7 @@ def calculate_subwatershed_boundary(
         # doesn't interfere with the loop return to think the cells are no
         # longer in the watershed
         for boundary_x, boundary_y in boundary_list:
+            boundary_managed_raster.set(boundary_x, boundary_y, stream_fid)
             discovery_managed_raster.set(boundary_x, boundary_y, -1)
     watershed_layer.CommitTransaction()
     watershed_layer = None
@@ -4160,7 +4238,8 @@ def calculate_subwatershed_boundary(
     discovery_managed_raster.close()
     finish_managed_raster.close()
     d8_flow_dir_managed_raster.close()
-    shutil.rmtree(workspace_dir)
+    boundary_managed_raster.close()
+    # shutil.rmtree(workspace_dir)
     LOGGER.info(
         '(calculate_subwatershed_boundary): watershed building 100% complete')
 
@@ -4553,24 +4632,19 @@ cdef void _diagonal_fill_step(
 
     # this section determines which back diagonal was in the watershed and
     # fills it. if none are we pick one so there's no degenerate case
-    cdef int xdelta = COL_OFFSETS[edge_dir]
-    cdef int ydelta = ROW_OFFSETS[edge_dir]
-    test_list = [
-        (x_l - xdelta, y_l),
-        (x_l, y_l - ydelta)]
-    for x_t, y_t in test_list:
-        point_discovery = <long>discovery_managed_raster.get(
-            x_t, y_t)
+    for _xt, _yt in [(x_l - COL_OFFSETS[edge_dir], y_l), (x_l, y_l - ROW_OFFSETS[edge_dir])]:
+        point_discovery = <long>discovery_managed_raster.get(_xt, _yt)
         if (point_discovery != discovery_nodata and
                 point_discovery >= discovery and
                 point_discovery <= finish):
-            boundary_list.append((int(x_t), int(y_t)))
+            boundary_list.append((_xt, _yt))
             # there's only one diagonal to fill in so it's done here
-            return
+            break
 
-    # if there's a degenerate case then just add the xdelta,
-    # it doesn't matter
-    boundary_list.append(test_list[0])
+    # # if there's a degenerate case then just add the xdelta,
+    # # it doesn't matter
+    # print('wrongly marking', test_list[0], 'as boundary')
+    # boundary_list.append(test_list[0])
 
 
 cdef int _in_watershed(
@@ -4601,6 +4675,7 @@ cdef int _in_watershed(
     if x_n < 0 or y_n < 0 or x_n >= n_cols or y_n >= n_rows:
         return 0
     cdef long point_discovery = <long>discovery_managed_raster.get(x_n, y_n)
+    print('in watershed?', point_discovery, discovery, finish)
     return (point_discovery != discovery_nodata and
             point_discovery >= discovery and
             point_discovery <= finish)
