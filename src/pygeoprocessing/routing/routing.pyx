@@ -4010,7 +4010,7 @@ def calculate_subwatershed_boundary(
                 elif not outlet_at_confluence:
                     visit_order_stack.append((working_fid, ds_x_1, ds_y_1))
 
-    cdef int edge_side, edge_dir, cell_to_test, out_dir_increase=-1
+    cdef int edge_side, edge_dir, cell_to_test = -1
     cdef int left, right, n_steps, terminated_early
     cdef int delta_x, delta_y
     cdef int _int_max_steps_per_watershed = max_steps_per_watershed
@@ -4040,15 +4040,15 @@ def calculate_subwatershed_boundary(
 
         # this is the center point of the pixel that will be offset to
         # make the edge
-        x_f = x_l+0.5
-        y_f = y_l+0.5
+        x_f = x_l + 0.5
+        y_f = y_l + 0.5
 
-        x_f += COL_OFFSETS[outflow_dir]*0.5
-        y_f += ROW_OFFSETS[outflow_dir]*0.5
+        x_f += COL_OFFSETS[outflow_dir] * 0.5
+        y_f += ROW_OFFSETS[outflow_dir] * 0.5
         if outflow_dir % 2 == 0:
             # need to back up the point a bit
-            x_f -= ROW_OFFSETS[outflow_dir]*0.5
-            y_f += COL_OFFSETS[outflow_dir]*0.5
+            x_f -= ROW_OFFSETS[outflow_dir] * 0.5
+            y_f += COL_OFFSETS[outflow_dir] * 0.5
 
         x_p, y_p = gdal.ApplyGeoTransform(geotransform, x_f, y_f)
         watershed_boundary.AddPoint(x_p, y_p)
@@ -4061,40 +4061,36 @@ def calculate_subwatershed_boundary(
         if outflow_dir % 2 == 0:
             # outflow through a straight side, so trivial edge detection
             edge_side = outflow_dir
-            edge_dir = (2+edge_side) % 8
+            edge_dir = (edge_side + 2) % 8
         else:
             # diagonal outflow requires testing neighboring cells to
             # determine first edge
-            cell_to_test = (outflow_dir+1) % 8
+            cell_to_test = (outflow_dir + 1) % 8
             edge_side = cell_to_test
-            edge_dir = (cell_to_test+2) % 8
+            edge_dir = (cell_to_test + 2) % 8
             if _in_watershed(
                     x_l, y_l, cell_to_test, discovery, finish,
                     n_cols, n_rows,
                     discovery_managed_raster, discovery_nodata):
-                edge_side = (edge_side-2) % 8
-                edge_dir = (edge_dir-2) % 8
+                edge_side = (edge_side - 2) % 8
+                edge_dir = (edge_dir - 2) % 8
                 x_l += COL_OFFSETS[edge_dir]
                 y_l += ROW_OFFSETS[edge_dir]
-                # note the pixel moved
-                print(f'adding current pixel {x_l}, {y_l} to boundary')
                 boundary_list.append((x_l, y_l))
-
-        print(f'starting from pixel {x_l}, {y_l}, vertex {x_f}, {y_f}, edge side {edge_side}, edge dir {edge_dir}')
 
         n_steps = 0
         terminated_early = 0
         geoms = []
         
-        starting_points = [((x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir, 'left')]
+        starting_points = [((x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir)]
         all_starting_points = set((x_f, y_f))
 
         while starting_points:
-            (x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir, orientation = starting_points.pop()
+            (x_l, y_l), (x_f, y_f), (x_p, y_p), edge_side, edge_dir = starting_points.pop()
             starting_point = (x_f, y_f)
             starting_dir = edge_dir
             vertices = [(x_p, y_p)]
-            print('starting from', (x_l, y_l), (x_f, y_f), edge_side, edge_dir, orientation)
+            print('starting from', (x_l, y_l), (x_f, y_f), edge_side, edge_dir)
 
             while True:
                 # step the edge then determine the projected coordinates
@@ -4106,12 +4102,10 @@ def calculate_subwatershed_boundary(
 
                 # equivalent to gdal.ApplyGeoTransform(geotransform, x_f, y_f)
                 # to eliminate python function call overhead
-                x_p = g0 + g1*x_f + g2*y_f
-                y_p = g3 + g4*x_f + g5*y_f
+                x_p = g0 + g1 * x_f + g2 * y_f
+                y_p = g3 + g4 * x_f + g5 * y_f
                 watershed_boundary.AddPoint(x_p, y_p)
                 vertices.append((x_p, y_p))
-
-                # boundary_list.append((x_l, y_l))
 
                 n_steps += 1
                 if n_steps > _int_max_steps_per_watershed:
@@ -4125,78 +4119,56 @@ def calculate_subwatershed_boundary(
                         f'{x_l}, {y_l} out of bounds for '
                         f'{n_cols}x{n_rows} raster.')
 
+                # counterclockwise configuration
+                left = edge_dir
+                right = (left - 1) % 8
 
-                if edge_side - ((edge_dir-2) % 8) == 0:
-                    # counterclockwise configuration
-                    left = edge_dir
-                    right = (left - 1) % 8
-                    out_dir_increase = 2
-                else:
-                    # clockwise configuration (swapping "left" and "right")
-                    right = edge_dir
-                    left = (right + 1) % 8
-                    out_dir_increase = -2
                 left_in = _in_watershed(
                     x_l, y_l, left, discovery, finish, n_cols, n_rows,
                     discovery_managed_raster, discovery_nodata)
                 right_in = _in_watershed(
                     x_l, y_l, right, discovery, finish, n_cols, n_rows,
                     discovery_managed_raster, discovery_nodata)
-                print('left', left, left_in)
-                print('right', right, right_in)
 
-                if orientation == 'left':
-                    if right_in and left_in:
-                        print(f'turn right, move pixel to {right}')
-                        # turn right
-                        out_dir = edge_side
-                        edge_side = (edge_side - out_dir_increase) % 8
-                        edge_dir = out_dir
-                        
-                        # add both left and right to the boundary
-                        # so that the boundary is a continuous border of pixels that share a side
-                        boundary_list.append((x_l + COL_OFFSETS[left], y_l + ROW_OFFSETS[left]))
-                        boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+                if right_in and left_in:  # turn right
+                    edge_dir = edge_side
+                    edge_side = (edge_side - 2) % 8
+                    
+                    # add both left and right to the boundary
+                    # so that the boundary is a continuous border of pixels that share a side
+                    boundary_list.append((x_l + COL_OFFSETS[left], y_l + ROW_OFFSETS[left]))
+                    boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
 
-                        # pixel moves to be the right cell
-                        x_l += COL_OFFSETS[right]
-                        y_l += ROW_OFFSETS[right]
+                    # move to the right pixel
+                    x_l += COL_OFFSETS[right]
+                    y_l += ROW_OFFSETS[right]
 
-                    elif left_in and not right_in:
-                        print(f'go straight, move pixel to {edge_dir}')
-                        # step forward
-                        x_l += COL_OFFSETS[edge_dir]
-                        y_l += ROW_OFFSETS[edge_dir]
-                        # the pixel moves forward
-                        boundary_list.append((x_l, y_l))
+                elif left_in and not right_in:  # continue straight
+                    # move the pixel to the next one in the edge direction
+                    x_l += COL_OFFSETS[edge_dir]
+                    y_l += ROW_OFFSETS[edge_dir]
+                    boundary_list.append((x_l, y_l))
 
-                    elif right_in and not left_in:  # continue straight and swap orientation
-                        print(f'turn left and push point to stack')
-                        # turn left
-                        edge_side = edge_dir
-                        edge_dir = (edge_side + out_dir_increase) % 8
+                elif right_in and not left_in:  # turn left and push edge to stack
+                    edge_side = edge_dir
+                    edge_dir = (edge_side + 2) % 8
 
-                        point = (
-                            (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]),
-                            (x_f, y_f),
-                            (x_p, y_p),
-                            (edge_side + 4) % 8,
-                            (edge_dir + 4) % 8,
-                            'left'
-                        )
-                        print('pushing', point)
+                    point = (
+                        (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]),
+                        (x_f, y_f),
+                        (x_p, y_p),
+                        (edge_side + 4) % 8,
+                        (edge_dir + 4) % 8,
+                    )
 
-                        if (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]) not in all_starting_points:
-                            starting_points.append(point)
-                            all_starting_points.add((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
-                        boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+                    if (x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]) not in all_starting_points:
+                        starting_points.append(point)
+                        all_starting_points.add((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
+                    boundary_list.append((x_l + COL_OFFSETS[right], y_l + ROW_OFFSETS[right]))
 
-                    else:
-                        print('turn left')
-                        # turn left
-                        edge_side = edge_dir
-                        edge_dir = (edge_side + out_dir_increase) % 8
-
+                else:  # turn left
+                    edge_side = edge_dir
+                    edge_dir = (edge_side + 2) % 8
 
                 if (x_f, y_f) == starting_point and edge_dir == starting_dir:
                     geoms.append(shapely.Polygon(vertices))
@@ -4204,9 +4176,6 @@ def calculate_subwatershed_boundary(
 
                 if delta_x == 0 and delta_y == 0:
                     break
-
-
-                print(f'pixel: ({x_l}, {y_l}), vertex: ({x_f}, {y_f}), edge side: {edge_side}, edge dir: {edge_dir}')
 
                 
 
