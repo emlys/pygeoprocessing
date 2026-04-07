@@ -30,6 +30,7 @@ direction raster, the following ``raster_map`` call may be used::
         'pygeoprocessing_d8_flow_dir.tif')
 """
 import collections
+import functools
 import logging
 import os
 import shutil
@@ -4012,7 +4013,6 @@ def calculate_subwatershed_boundary(
 
     cdef int edge_side, edge_dir, cell_to_test = -1
     cdef int left, right, n_steps, terminated_early
-    cdef int delta_x, delta_y
     cdef int _int_max_steps_per_watershed = max_steps_per_watershed
 
     for index, (stream_fid, x_l, y_l) in enumerate(visit_order_stack):
@@ -4053,10 +4053,6 @@ def calculate_subwatershed_boundary(
         x_p, y_p = gdal.ApplyGeoTransform(geotransform, x_f, y_f)
         watershed_boundary.AddPoint(x_p, y_p)
 
-        # keep track of how many steps x/y and when we get back to 0 we've
-        # made a loop
-        delta_x, delta_y = 0, 0
-
         # determine the first edge
         if outflow_dir % 2 == 0:
             # outflow through a straight side, so trivial edge detection
@@ -4096,9 +4092,6 @@ def calculate_subwatershed_boundary(
                 # step the edge then determine the projected coordinates
                 x_f += COL_OFFSETS[edge_dir]
                 y_f += ROW_OFFSETS[edge_dir]
-
-                delta_x += COL_OFFSETS[edge_dir]
-                delta_y += ROW_OFFSETS[edge_dir]
 
                 # equivalent to gdal.ApplyGeoTransform(geotransform, x_f, y_f)
                 # to eliminate python function call overhead
@@ -4174,16 +4167,9 @@ def calculate_subwatershed_boundary(
                     geoms.append(shapely.Polygon(vertices))
                     break
 
-                if delta_x == 0 and delta_y == 0:
-                    break
-
-                
-
         print(stream_fid, 'geoms:', len(geoms))
 
-        watershed_polygon = shapely.Polygon()
-        for geom in geoms:
-            watershed_polygon = shapely.union(watershed_polygon, geom)
+        watershed_polygon = functools.reduce(shapely.union, geoms)
 
         watershed_feature = ogr.Feature(watershed_layer.GetLayerDefn())
         watershed_polygon = ogr.CreateGeometryFromWkb(watershed_polygon.wkb)
