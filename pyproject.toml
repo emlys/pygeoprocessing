@@ -34,14 +34,13 @@ dynamic = ["version", "dependencies", "optional-dependencies", "readme"]
 [build-system]
 # these are the minimum packages needed in order to execute the pygeoprocessing build.
 # Setuptools, wheel are from pep508.
-# NOTE: GDAL is *not* require here because the compiled cython module will
-# dynamically import GDAL via python's import system.  This behavior means
-# that we can provide a much easier build experience so long as GDAL is
-# available at runtime.
+# NOTE: gdal is not required here because the gdal python package is not used
+# in the build process. However, the underlying gdal library must be available
+# in order to compile and link the C++ extensions. The gdal libraries must be
+# installed before attempting to build pygeoprocessing; pip cannot
+# automatically install them in the build environment.
 requires = [
-    'setuptools', 'wheel', 'setuptools_scm', 'cython>=3.0.0',
-    'oldest-supported-numpy; python_version<="3.8"',
-    'numpy>=2; python_version>="3.9"',  # Numpy 2 only available for 3.9+
+    'setuptools', 'wheel', 'setuptools_scm', 'cython>=3.0.0', 'numpy>=2'
 ]
 build-backend = "setuptools.build_meta"
 
@@ -53,3 +52,6 @@ filterwarnings = ["error", "default::DeprecationWarning", "default::FutureWarnin
 [tool.setuptools_scm]
 version_scheme = "post-release"
 local_scheme = "node-and-date"
+
+[tool.uv]
+exclude-dependencies = ["gdal"]
