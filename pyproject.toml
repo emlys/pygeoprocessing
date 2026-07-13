@@ -54,4 +54,7 @@ version_scheme = "post-release"
 local_scheme = "node-and-date"
 
 [tool.uv]
-exclude-dependencies = ["gdal"]
+exclude-dependencies = [
+    "gdal",
+    { package = { name = "shapely" }, dependencies = ["gdal"] }
+]
