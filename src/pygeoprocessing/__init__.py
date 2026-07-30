@@ -24,6 +24,7 @@ from .geoprocessing import choose_nodata
 from .geoprocessing import convolve_2d
 from .geoprocessing import create_raster_from_bounding_box
 from .geoprocessing import create_raster_from_vector_extents
+from .geoprocessing import dask_array_to_raster
 from .geoprocessing import distance_transform_edt
 from .geoprocessing import get_gis_type
 from .geoprocessing import get_raster_info
@@ -35,8 +36,10 @@ from .geoprocessing import merge_bounding_box_list
 from .geoprocessing import new_raster_from_base
 from .geoprocessing import numpy_array_to_raster
 from .geoprocessing import raster_calculator
+from .geoprocessing import raster_calculator_with_dask
 from .geoprocessing import raster_map
 from .geoprocessing import raster_reduce
+from .geoprocessing import raster_to_dask_array
 from .geoprocessing import raster_to_numpy_array
 from .geoprocessing import rasterize
 from .geoprocessing import ReclassificationMissingValuesError

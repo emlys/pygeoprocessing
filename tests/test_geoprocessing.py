@@ -15,6 +15,7 @@ import unittest
 import unittest.mock
 import warnings
 
+import dask
 import numpy
 import packaging.version
 import pygeoprocessing
@@ -2686,6 +2687,40 @@ class TestGeoprocessing(unittest.TestCase):
                 pygeoprocessing.raster_to_numpy_array(base_path),
                 pygeoprocessing.raster_to_numpy_array(target_path)).all())
 
+    def test_raster_to_dask_array(self):
+        raster_path = os.path.join(self.workspace_dir, 'arr.tif')
+        array = numpy.ones((100, 100))
+        pygeoprocessing.numpy_array_to_raster(
+            array, None, (1, -1), (0, 0), None, raster_path)
+        da = pygeoprocessing.raster_to_dask_array(raster_path)
+        numpy.testing.assert_allclose(array, da.compute())
+
+    def test_dask_array_to_raster(self):
+        raster_path = os.path.join(self.workspace_dir, 'arr.tif')
+        da = dask.array.ones((100, 100))
+        pygeoprocessing.dask_array_to_raster(
+            da, None, (1, -1), (0, 0), None, raster_path)
+        array = pygeoprocessing.raster_to_numpy_array(raster_path)
+        numpy.testing.assert_allclose(array, da.compute())
+
+    def test_raster_calculator_with_dask(self):
+        """PGP.geoprocessing: raster_calculator identity test."""
+        pixel_matrix = numpy.ones((1000, 10000), numpy.int16)
+        target_nodata = -1
+        base_path = os.path.join(self.workspace_dir, 'base.tif')
+        _array_to_raster(pixel_matrix, target_nodata, base_path)
+
+        target_path = os.path.join(self.workspace_dir, 'subdir', 'target.tif')
+
+        pygeoprocessing.raster_calculator_with_dask(
+            [(base_path, 1)], arithmetic_wrangle, target_path,
+            gdal.GDT_Int32, target_nodata, calc_raster_stats=True,
+            use_shared_memory=True)
+
+        numpy.testing.assert_allclose(
+            pygeoprocessing.raster_to_numpy_array(target_path),
+            numpy.full((1000, 10000), -1))
+
     def test_raster_calculator_stats(self):
         """PGP.geoprocessing: raster_calculator test stats are saved."""
         blocksize = 5
@@ -2724,16 +2759,13 @@ class TestGeoprocessing(unittest.TestCase):
         _array_to_raster(pixel_matrix, target_nodata, base_path)
 
         target_path = os.path.join(self.workspace_dir, 'subdir', 'target.tif')
-
         pygeoprocessing.multiprocessing.raster_calculator(
             [(base_path, 1)], arithmetic_wrangle, target_path,
             gdal.GDT_Int32, target_nodata, calc_raster_stats=True,
             use_shared_memory=True)
-
-        self.assertTrue(
-            numpy.isclose(
-                arithmetic_wrangle(pixel_matrix),
-                pygeoprocessing.raster_to_numpy_array(target_path)).all())
+        numpy.testing.assert_allclose(
+            arithmetic_wrangle(pixel_matrix),
+            pygeoprocessing.raster_to_numpy_array(target_path)).all()
 
     def test_raster_calculator_multiprocessing_cwd(self):
         """PGP.geoprocessing: raster_calculator identity test in cwd."""

@@ -15,8 +15,11 @@ import threading
 import time
 import warnings
 
+import dask
+from dask.diagnostics import ProgressBar
 import numpy
 import numpy.ma
+import rioxarray
 import rtree
 import scipy.interpolate
 import scipy.ndimage
@@ -576,6 +579,459 @@ def raster_calculator(
                     raise exception
                 except queue.Empty:
                     pass
+
+
+def raster_to_dask_array(raster_path, band_id=1, largest_block=_LARGEST_ITERBLOCK):
+    """Create a lazy dask array reading from a raster on demand."""
+    raster_info = get_raster_info(raster_path)
+    block_offset_list = list(iterblocks(
+        (raster_path, band_id), offset_only=True,
+        largest_block=largest_block))
+    dask_array = dask.array.empty(
+        shape=(raster_info['raster_size'][1], raster_info['raster_size'][0]))
+
+    def read_block(raster_path, band_id, block_offset):
+        print(block_offset)
+        raster = gdal.OpenEx(raster_path, gdal.OF_RASTER)
+        band = raster.GetRasterBand(band_id)
+        return band.ReadAsArray(**block_offset)
+
+    for block_offset in block_offset_list:
+        # create a delayed dask array from the block of raster data
+        # it won't be read into memory until needed by the dask graph
+        block = dask.array.from_delayed(
+            dask.delayed(read_block)(raster_path, band_id, block_offset),
+            (block_offset['win_ysize'], block_offset['win_xsize']),
+            dtype=float)
+        dask_array[
+            block_offset['yoff']:block_offset['yoff'] + block_offset['win_ysize'],
+            block_offset['xoff']:block_offset['xoff'] + block_offset['win_xsize']
+        ] = block
+    return dask_array
+
+
+def dask_array_to_raster(array, target_nodata, pixel_size, origin,
+        projection_wkt, target_path,
+        raster_driver_creation_tuple=DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS):
+    """Write a dask array to a raster file one block at a time."""
+    driver_name, creation_options = raster_driver_creation_tuple
+    raster_driver = gdal.GetDriverByName(driver_name)
+    ny, nx = array.shape
+    gdal_type, type_creation_options = _numpy_to_gdal_type(array.dtype)
+    new_raster = raster_driver.Create(
+        target_path, nx, ny, 1, gdal_type,
+        options=list(creation_options) + type_creation_options)
+    if projection_wkt is not None:
+        new_raster.SetProjection(projection_wkt)
+    if origin is not None and pixel_size is not None:
+        new_raster.SetGeoTransform(
+            [origin[0], pixel_size[0], 0, origin[1], 0, pixel_size[1]])
+    elif origin is not None or pixel_size is not None:
+        raise ValueError(
+            "Origin and pixel size must both be defined or both be None")
+    new_band = new_raster.GetRasterBand(1)
+    if target_nodata is not None:
+        if numpy.issubdtype(type(target_nodata), numpy.floating):
+            target_nodata = float(target_nodata)
+        elif numpy.issubdtype(type(target_nodata), numpy.integer):
+            target_nodata = int(target_nodata)
+        # Explicitly leaving off an else clause in case there's an edge case we
+        # don't know about.  If so, we should wait for GDAL to raise an error.
+        new_band.SetNoDataValue(target_nodata)
+
+    block_ysize, block_xsize = array.chunksize
+    n_y_blocks, n_x_blocks = array.blocks.shape
+    print('chunksize', array.chunksize)
+    print('blocks shape', array.blocks.shape)
+    for y in range(n_y_blocks):
+        for x in range(n_x_blocks):
+            print(f'block {y, x}')
+            block = array.blocks[x, y].compute()
+            print(block.shape)
+            print('writing to', y * block_ysize, x * block_xsize)
+            new_band.WriteArray(
+                block, yoff=y * block_ysize,
+                xoff=x * block_xsize)
+
+
+
+@gdal_use_exceptions
+def raster_calculator_with_dask(
+        base_raster_path_band_const_list, local_op, target_raster_path,
+        datatype_target, nodata_target,
+        calc_raster_stats=True, use_shared_memory=False,
+        largest_block=_LARGEST_ITERBLOCK, max_timeout=_MAX_TIMEOUT,
+        raster_driver_creation_tuple=DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS):
+    """Apply a raster operation on a stack of rasters.
+
+    This function applies a user defined function across a stack of
+    rasters' pixel stack. The rasters in ``base_raster_path_band_list`` must
+    be spatially aligned and have the same cell sizes.
+
+    Args:
+        base_raster_path_band_const_list (sequence): a sequence containing:
+
+            * ``(str, int)`` tuples, referring to a raster path/band index pair
+              to use as an input.
+            * ``numpy.ndarray`` s of up to two dimensions.  These inputs must
+              all be broadcastable to each other AND the size of the raster
+              inputs.
+            * ``(object, 'raw')`` tuples, where ``object`` will be passed
+              directly into the ``local_op``.
+
+            All rasters must have the same raster size. If only arrays are
+            input, numpy arrays must be broadcastable to each other and the
+            final raster size will be the final broadcast array shape. A value
+            error is raised if only "raw" inputs are passed. Raster paths may use
+            any GDAL-supported scheme, including virtual file system /vsi schemes.
+        local_op (function): a function that must take in as many parameters as
+            there are elements in ``base_raster_path_band_const_list``. The
+            parameters in ``local_op`` will map 1-to-1 in order with the values
+            in ``base_raster_path_band_const_list``. ``raster_calculator`` will
+            call ``local_op`` to generate the pixel values in ``target_raster``
+            along memory block aligned processing windows. Note any
+            particular call to ``local_op`` will have the arguments from
+            ``raster_path_band_const_list`` sliced to overlap that window.
+            If an argument from ``raster_path_band_const_list`` is a
+            raster/path band tuple, it will be passed to ``local_op`` as a 2D
+            numpy array of pixel values that align with the processing window
+            that ``local_op`` is targeting. A 2D or 1D array will be sliced to
+            match the processing window and in the case of a 1D array tiled in
+            whatever dimension is flat. If an argument is a scalar it is
+            passed as as scalar.
+            The return value must be a 2D array of the same size as any of the
+            input parameter 2D arrays and contain the desired pixel values
+            for the target raster.
+        target_raster_path (string): the path of the output raster.  The
+            projection, size, and cell size will be the same as the rasters
+            in ``base_raster_path_const_band_list`` or the final broadcast
+            size of the constant/ndarray values in the list.
+        datatype_target (gdal datatype; int): the desired GDAL output type of
+            the target raster.
+        nodata_target (numerical value): the desired nodata value of the
+            target raster.
+        calc_raster_stats (boolean): If True, calculates and sets raster
+            statistics (min, max, mean, and stdev) for target raster.
+        use_shared_memory (boolean): If True, uses Python Multiprocessing
+            shared memory to calculate raster stats for faster performance.
+            This feature is available for Python >= 3.8 and will otherwise
+            be ignored for earlier versions of Python.
+        largest_block (int): Attempts to internally iterate over raster blocks
+            with this many elements.  Useful in cases where the blocksize is
+            relatively small, memory is available, and the function call
+            overhead dominates the iteration.  Defaults to 2**20.  A value of
+            anything less than the original blocksize of the raster will
+            result in blocksizes equal to the original size.
+        max_timeout (float): amount of time in seconds to wait for stats
+            worker thread to join. Default is _MAX_TIMEOUT.
+        raster_driver_creation_tuple (tuple): a tuple containing a GDAL driver
+            name string as the first element and a GDAL creation options
+            tuple/list as the second. Defaults to
+            geoprocessing.DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS.
+
+    Return:
+        None
+
+    Raises:
+        ValueError: invalid input provided
+
+    """
+    if not base_raster_path_band_const_list:
+        raise ValueError(
+            "`base_raster_path_band_const_list` is empty and "
+            "should have at least one value.")
+
+    # It's a common error to not pass in path/band tuples, so check for that
+    # and report error if so
+    bad_raster_path_list = False
+    if not isinstance(base_raster_path_band_const_list, (list, tuple)):
+        bad_raster_path_list = True
+    else:
+        for value in base_raster_path_band_const_list:
+            if (not _is_raster_path_band_formatted(value) and
+                not isinstance(value, numpy.ndarray) and
+                not (isinstance(value, tuple) and len(value) == 2 and
+                     value[1] == 'raw')):
+                bad_raster_path_list = True
+                break
+    if bad_raster_path_list:
+        raise ValueError(
+            "Expected a sequence of path / integer band tuples, "
+            "ndarrays, or (value, 'raw') pairs for "
+            "`base_raster_path_band_const_list`, instead got: "
+            f"{pprint.pformat(base_raster_path_band_const_list)}")
+
+    base_raster_path_band_list = [
+        path_band for path_band in base_raster_path_band_const_list
+        if _is_raster_path_band_formatted(path_band)]
+
+    # check that the target raster is not also an input raster
+    if target_raster_path in [x[0] for x in base_raster_path_band_list]:
+        raise ValueError(
+            f"{target_raster_path} is used as a target path, but it is also "
+            f"in the base input path list {str(base_raster_path_band_const_list)}")
+
+    # check that raster inputs are all the same dimensions
+    raster_info_list = [
+        get_raster_info(path_band[0])
+        for path_band in base_raster_path_band_list]
+    geospatial_info = [
+        raster_info['raster_size'] for raster_info in raster_info_list]
+    if len(set(geospatial_info)) > 1:
+        raise ValueError(
+            "Input Rasters are not the same dimensions. The "
+            "following raster are not identical: %s" % pprint.pformat(
+                [(path_band[0], dimensions) for (path_band, dimensions) in
+                zip(base_raster_path_band_list, geospatial_info)]))
+
+    numpy_broadcast_list = [
+        x for x in base_raster_path_band_const_list
+        if isinstance(x, numpy.ndarray)]
+    stats_worker_thread = None
+    try:
+        # numpy.broadcast can only take up to 32 arguments, this loop works
+        # around that restriction:
+        while len(numpy_broadcast_list) > 1:
+            numpy_broadcast_list = (
+                [numpy.broadcast(*numpy_broadcast_list[:32])] +
+                numpy_broadcast_list[32:])
+        if numpy_broadcast_list:
+            numpy_broadcast_size = numpy_broadcast_list[0].shape
+    except ValueError:
+        # this gets raised if numpy.broadcast fails
+        raise ValueError(
+            "Numpy array inputs cannot be broadcast into a single shape %s" %
+            numpy_broadcast_list)
+
+    if numpy_broadcast_list and len(numpy_broadcast_list[0].shape) > 2:
+        raise ValueError(
+            "Numpy array inputs must be 2 dimensions or less %s" %
+            numpy_broadcast_list)
+
+    # if there are both rasters and arrays, check the numpy shape will
+    # be broadcastable with raster shape
+    if raster_info_list and numpy_broadcast_list:
+        # geospatial lists x/y order and numpy does y/x so reverse size list
+        raster_shape = tuple(reversed(raster_info_list[0]['raster_size']))
+        invalid_broadcast_size = False
+        if len(numpy_broadcast_size) == 1:
+            # if there's only one dimension it should match the last
+            # dimension first, in the raster case this is the columns
+            # because of the row/column order of numpy. No problem if
+            # that value is ``1`` because it will be broadcast, otherwise
+            # it should be the same as the raster.
+            if (numpy_broadcast_size[0] != raster_shape[1] and
+                    numpy_broadcast_size[0] != 1):
+                invalid_broadcast_size = True
+        else:
+            for dim_index in range(2):
+                # no problem if 1 because it'll broadcast, otherwise must
+                # be the same value
+                if (numpy_broadcast_size[dim_index] !=
+                        raster_shape[dim_index] and
+                        numpy_broadcast_size[dim_index] != 1):
+                    invalid_broadcast_size = True
+        if invalid_broadcast_size:
+            raise ValueError(
+                "Raster size %s cannot be broadcast to numpy shape %s" % (
+                    raster_shape, numpy_broadcast_size))
+
+    with GDALUseExceptions():
+        # create a "canonical" argument list that's 2d dask arrays or
+        # raw values only
+        base_canonical_arg_list = []
+        for value in base_raster_path_band_const_list:
+            # the input has been tested and value is either a raster/path band
+            # tuple, 1d ndarray, 2d ndarray, or (value, 'raw') tuple.
+            if _is_raster_path_band_formatted(value):
+                base_canonical_arg_list.append(
+                    raster_to_dask_array(value[0], value[1]))
+            elif isinstance(value, numpy.ndarray):
+                if value.ndim == 1:
+                    # easier to process as a 2d array for writing to band
+                    base_canonical_arg_list.append(
+                        dask.from_array(value.reshape((1, value.shape[0]))))
+                else:  # dimensions are two because we checked earlier.
+                    base_canonical_arg_list.append(dask.from_array(value))
+            elif isinstance(value, tuple):
+                base_canonical_arg_list.append(value)
+            else:
+                raise ValueError(
+                    "An unexpected value occurred. This should never happen. "
+                    f"Value: {value}")
+
+        # create target raster
+        if raster_info_list:
+            # if rasters are passed, the target is the same size as the raster
+            n_cols, n_rows = raster_info_list[0]['raster_size']
+        elif numpy_broadcast_list:
+            # numpy arrays in args and no raster result is broadcast shape
+            # expanded to two dimensions if necessary
+            if len(numpy_broadcast_size) == 1:
+                n_rows, n_cols = 1, numpy_broadcast_size[0]
+            else:
+                n_rows, n_cols = numpy_broadcast_size
+        else:
+            raise ValueError(
+                "Only (object, 'raw') values have been passed. Raster "
+                "calculator requires at least a raster or numpy array as a "
+                "parameter. This is the input list: %s" % pprint.pformat(
+                    base_raster_path_band_const_list))
+
+        if datatype_target not in _VALID_GDAL_TYPES:
+            raise ValueError(
+                'Invalid target type, should be a gdal.GDT_* type, received '
+                f'"{datatype_target}"')
+
+        # create target raster directory
+        os.makedirs(os.path.dirname(target_raster_path), exist_ok=True)
+
+        try:
+            timed_logger = TimedLoggingAdapter(_LOGGING_PERIOD)
+
+            # block_offset_list = list(iterblocks(
+            #     (target_raster_path, 1), offset_only=True,
+            #     largest_block=largest_block))
+
+            # if calc_raster_stats:
+            #     # if this queue is used to send computed valid blocks of
+            #     # the raster to an incremental statistics calculator worker
+            #     stats_worker_queue = queue.Queue()
+            #     exception_queue = queue.Queue()
+
+            #     if sys.version_info >= (3, 8) and use_shared_memory:
+            #         # The stats worker keeps running variables as a float64, so
+            #         # all input rasters are dtype float64 -- make the shared memory
+            #         # size equivalent.
+            #         block_size_bytes = (
+            #             numpy.dtype(numpy.float64).itemsize *
+            #             block_offset_list[0]['win_xsize'] *
+            #             block_offset_list[0]['win_ysize'])
+
+            #         shared_memory = multiprocessing.shared_memory.SharedMemory(
+            #             create=True, size=block_size_bytes)
+
+            #     # To avoid doing two passes on the raster to calculate standard
+            #     # deviation, we implement a continuous statistics calculation
+            #     # as the raster is computed. This computational effort is high
+            #     # and benefits from running in parallel. This queue and worker
+            #     # takes a valid block of a raster and incrementally calculates
+            #     # the raster's statistics. When ``None`` is pushed to the queue
+            #     # the worker will finish and return a (min, max, mean, std)
+            #     # tuple.
+            #     LOGGER.info('starting stats_worker')
+            #     stats_worker_thread = threading.Thread(
+            #         target=geoprocessing_core.stats_worker,
+            #         args=(stats_worker_queue, len(block_offset_list)))
+            #     stats_worker_thread.daemon = True
+            #     stats_worker_thread.start()
+            #     LOGGER.info('started stats_worker %s', stats_worker_thread)
+
+            # else:
+            #     stats_worker_queue = None
+
+            def op_wrapper(*args):
+                LOGGER.info('Calling op')
+                print('calling op with args', args)
+                result = local_op(*args)
+                print('result', result)
+                return result
+
+            result = dask.array.map_blocks(
+                op_wrapper, *base_canonical_arg_list,
+                meta=numpy.array((), dtype=numpy.float32))
+            print(result)
+
+            # this should trigger computation of the dask graph
+            with ProgressBar():
+                dask_array_to_raster(
+                    result,
+                    target_nodata=nodata_target,
+                    pixel_size=raster_info_list[0]['pixel_size'],
+                    origin=(raster_info_list[0]['geotransform'][0],
+                            raster_info_list[0]['geotransform'][3]),
+                    projection_wkt=raster_info_list[0]['projection_wkt'],
+                    target_path=target_raster_path,
+                    raster_driver_creation_tuple=raster_driver_creation_tuple)
+
+            # # send result to stats calculator
+            # if stats_worker_queue:
+            #     # guard against an undefined nodata target
+            #     if nodata_target is not None:
+            #         valid_mask = ~array_equals_nodata(target_block, nodata_target)
+            #         valid_pixel_count += valid_mask.sum()
+            #         target_block = target_block[valid_mask]
+            #     target_block = target_block.astype(numpy.float64).flatten()
+
+            #     if sys.version_info >= (3, 8) and use_shared_memory:
+            #         shared_memory_array = numpy.ndarray(
+            #             target_block.shape, dtype=target_block.dtype,
+            #             buffer=shared_memory.buf)
+            #         shared_memory_array[:] = target_block[:]
+
+            #         stats_worker_queue.put((
+            #             shared_memory_array.shape, shared_memory_array.dtype,
+            #             shared_memory))
+            #     else:
+            #         stats_worker_queue.put(target_block)
+
+            LOGGER.info('100.0% complete')
+
+            # if calc_raster_stats:
+            #     LOGGER.info("Waiting for raster stats worker result.")
+            #     stats_worker_thread.join(max_timeout)
+            #     if stats_worker_thread.is_alive():
+            #         LOGGER.error("stats_worker_thread.join() timed out")
+            #         raise RuntimeError("stats_worker_thread.join() timed out")
+            #     payload = stats_worker_queue.get(True, max_timeout)
+            #     if payload is not None:
+            #         target_min, target_max, target_mean, target_stddev = payload
+            #         # In Cython 3.0.0+, taking a square root may return a complex.
+            #         # Using only the real component of the complex value mimics the
+            #         # C behavior that we expect from our stats worker.
+            #         if isinstance(target_stddev, complex):
+            #             target_stddev = target_stddev.real
+            #         target_band.SetStatistics(
+            #             float(target_min), float(target_max), float(target_mean),
+            #             float(target_stddev))
+            #         target_band.SetMetadataItem(
+            #             'STATISTICS_VALID_PERCENT',
+            #             f'{(valid_pixel_count / n_pixels * 100):.2f}')
+            #         target_band.FlushCache()
+        except Exception:
+            LOGGER.exception('exception encountered in raster_calculator')
+            raise
+        finally:
+            # This block ensures that rasters are destroyed even if there's an
+            # exception raised.
+
+            if calc_raster_stats and stats_worker_thread:
+                if stats_worker_thread.is_alive():
+                    stats_worker_queue.put(None, True, max_timeout)
+                    LOGGER.info("Waiting for raster stats worker result.")
+                    stats_worker_thread.join(max_timeout)
+                    if stats_worker_thread.is_alive():
+                        LOGGER.error("stats_worker_thread.join() timed out")
+                        raise RuntimeError(
+                            "stats_worker_thread.join() timed out")
+
+                if sys.version_info >= (3, 8) and use_shared_memory:
+                    LOGGER.debug(
+                        f'unlink shared memory for process {os.getpid()}')
+                    shared_memory.close()
+                    shared_memory.unlink()
+                    LOGGER.debug(
+                        f'unlinked shared memory for process {os.getpid()}')
+
+                # check for an exception in the workers, otherwise get result
+                # and pass to writer
+                try:
+                    exception = exception_queue.get_nowait()
+                    LOGGER.error("Exception encountered at termination.")
+                    raise exception
+                except queue.Empty:
+                    pass
+
 
 
 def array_equals_nodata(array, nodata):
