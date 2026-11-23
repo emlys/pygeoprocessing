@@ -2304,8 +2304,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, target_raster_path_list,
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0,
-                compare_in_equal_earth=False)
+                raster_align_index=0, compare_in_equal_earth=False)
         expected_message = 'must be the same length'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2316,8 +2315,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, ['target_a.tif'],
                 resample_method_list,
                 100.0, bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0,
-                compare_in_equal_earth=False)
+                raster_align_index=0, compare_in_equal_earth=False)
         expected_message = 'target_pixel_size is not a tuple'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2328,7 +2326,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, ['target_a.tif'],
                 resample_method_list,
                 [100.0, "ten"], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0,
+                raster_align_index=0,
                 compare_in_equal_earth=False)
         expected_message = 'Invalid value for `target_pixel_size`'
         actual_message = str(cm.exception)
@@ -2340,7 +2338,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, ['target_a.tif'],
                 resample_method_list,
                 [100.0, 100.0, 100.0], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0,
+                raster_align_index=0,
                 compare_in_equal_earth=False)
         expected_message = 'Invalid value for `target_pixel_size`'
         actual_message = str(cm.exception)
@@ -2370,7 +2368,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, target_raster_path_list,
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0)
+                raster_align_index=0)
 
         expected_message = 'There are duplicated paths on the target list.'
         actual_message = str(cm.exception)
@@ -2399,7 +2397,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, target_raster_path_list,
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=0)
+                raster_align_index=0)
 
     def test_align_and_resize_raster_stack_bad_index(self):
         """PGP.geoprocessing: align/resize raster test intersection."""
@@ -2424,7 +2422,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, target_raster_path_list,
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
-                base_vector_path_list=None, raster_align_index=-1)
+                raster_align_index=-1)
 
     def test_align_and_resize_raster_stack_int(self):
         """PGP.geoprocessing: align/resize raster test intersection."""
@@ -2466,7 +2464,7 @@ class TestGeoprocessing(unittest.TestCase):
             base_raster_path_list, target_raster_path_list,
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
-            base_vector_path_list=None, raster_align_index=0,
+            raster_align_index=0,
             compare_in_equal_earth=False)
 
         for raster_index in range(len(target_raster_path_list)):
@@ -2655,7 +2653,7 @@ class TestGeoprocessing(unittest.TestCase):
             base_raster_path_list, target_raster_path_list,
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
-            base_vector_path_list=None, raster_align_index=0,
+            raster_align_index=0,
             compare_in_equal_earth=False)
 
         # we expect this to be twice as big since second base raster has a
@@ -2711,7 +2709,7 @@ class TestGeoprocessing(unittest.TestCase):
             resample_method_list,
             base_a_raster_info['pixel_size'],
             target_bbox,
-            base_vector_path_list=None, raster_align_index=0,
+            raster_align_index=0,
             compare_in_equal_earth=False)
 
         # REGRESSION TEST: make sure this input variable is unmodified after
