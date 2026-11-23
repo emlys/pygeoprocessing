@@ -1007,8 +1007,7 @@ def align_and_resize_raster_stack(
         else:
             vector_info_list = []
 
-        equal_earth_ref = osr.SpatialReference()
-        equal_earth_ref.ImportFromEPSG(8857)  # Equal Earth
+        equal_earth_ref = osr.SpatialReference(epsg=8857)  # Equal Earth
         equal_earth_wkt = equal_earth_ref.ExportToWkt()
 
         bounding_box_list = []
@@ -3732,13 +3731,37 @@ def transform_bounding_box(
 
     # Create a coordinate transformation
     transformer = osr.CreateCoordinateTransformation(base_ref, target_ref)
-    raw_bounding_box = transformer.TransformBounds(
-        xmin=bounding_box[0],
-        ymin=bounding_box[1],
-        xmax=bounding_box[2],
-        ymax=bounding_box[3],
-        densify_pts=21  # as recommended by the gdal docs
-    )
+
+    def _transform_point(point):
+        """Transform an (x,y) point tuple from base_ref to target_ref."""
+        trans_x, trans_y, _ = (transformer.TransformPoint(*point))
+        return (trans_x, trans_y)
+
+    # The following list comprehension iterates over each edge of the bounding
+    # box, divides each edge into ``edge_samples`` number of points, then
+    # reduces that list to an appropriate ``bounding_fn`` given the edge.
+    # For example the left edge needs to be the minimum x coordinate so
+    # we generate ``edge_samples` number of points between the upper left and
+    # lower left point, transform them all to the new coordinate system
+    # then get the minimum x coordinate "min(p[0] ...)" of the batch.
+    # points are numbered from 0 starting upper right as follows:
+    # 0--3
+    # |  |
+    # 1--2
+    p_0 = numpy.array((bounding_box[0], bounding_box[3]))
+    p_1 = numpy.array((bounding_box[0], bounding_box[1]))
+    p_2 = numpy.array((bounding_box[2], bounding_box[1]))
+    p_3 = numpy.array((bounding_box[2], bounding_box[3]))
+    raw_bounding_box = [
+        bounding_fn(
+            [_transform_point(
+                p_a * v + p_b * (1 - v)) for v in numpy.linspace(
+                    0, 1, edge_samples)])
+        for p_a, p_b, bounding_fn in [
+            (p_0, p_1, lambda p_list: min([p[0] for p in p_list])),
+            (p_1, p_2, lambda p_list: min([p[1] for p in p_list])),
+            (p_2, p_3, lambda p_list: max([p[0] for p in p_list])),
+            (p_3, p_0, lambda p_list: max([p[1] for p in p_list]))]]
 
     # sometimes a transform will be so tight that a sampling around it may
     # flip the coordinate system. This flips it back. I found this when
