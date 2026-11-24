@@ -70,6 +70,8 @@ _VALID_GDAL_TYPES = (
 
 _LOGGING_PERIOD = 5.0  # min 5.0 seconds per update log message for the module
 _LARGEST_ITERBLOCK = 2**16  # largest block for iterblocks to read in cells
+EQUAL_EARTH_WKT = osr.SpatialReference(epsg=8857).ExportToWkt()  # Equal Earth
+
 
 class TimedLoggingAdapter(logging.LoggerAdapter):
     """A logging adapter to restrict logging based on a timer.
@@ -803,7 +805,7 @@ def align_and_resize_raster_stack(
         base_raster_path_list, target_raster_path_list, resample_method_list,
         target_pixel_size, bounding_box_mode, base_vector_path_list=None,
         raster_align_index=None, base_projection_wkt_list=None,
-        target_projection_wkt=None, compare_in_equal_earth=True,
+        comparison_projection_wkt=EQUAL_EARTH_WKT, target_projection_wkt=None,
         mask_options=None, vector_mask_options=None, gdal_warp_options=None,
         raster_driver_creation_tuple=DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS,
         osr_axis_mapping_strategy=DEFAULT_OSR_AXIS_MAPPING_STRATEGY,
@@ -858,12 +860,25 @@ def align_and_resize_raster_stack(
             ``base_raster_path_list``. If a value is ``None``, the projection
             is read directly from the raster. Use this argument if there are
             rasters with no projection defined, but the projections are known.
-        compare_in_equal_earth (bool): if True, transform bounding boxes into
-            Equal Earth (EPSG:8857) before calculating their intersection or
-            union. This is needed when an input bounding box might extend
-            beyond the usable extent of the target projection (for instance, a
-            global layer in WGS84 being aligned to a small area in a UTM zone
-            projection). Otherwise, the results may be inaccurate.
+        comparison_projection_wkt (string): WKT representation of the
+            projection in which to compare input bounding boxes. All input
+            bounding boxes will be transformed to this projection before
+            calculating their union or intersection. It is important to
+            distinguish between the comparison projection and the target
+            projection whenever an input bounding box might extend beyond the
+            usable extent of the target projection (for instance, a global
+            layer in WGS84 being aligned to a smaller area in a UTM zone
+            projection). If the global bounding box can't be accurately
+            represented in the comparison projection, the calculated
+            intersection will be incorrect. Therefore it is recommended to use
+            the default (Equal Earth, EPSG:8857) or another projection with
+            global coverage unless you are sure that all inputs fall within the
+            target projection extent. In that case, you can set
+            ``comparison_projection_wkt`` to the same value as
+            ``target_projection_wkt`` and avoid some inaccuracy introduced by
+            the second transformation. Must be set to ``None`` if
+            ``target_projection_wkt`` is ``None``. Must be defined if
+            ``target_projection_wkt`` is defined.
         target_projection_wkt (string): if not ``None``, this is the desired
             projection of all target rasters in Well Known Text format, and
             target rasters will be warped to this projection. If ``None``,
@@ -979,10 +994,14 @@ def align_and_resize_raster_stack(
             "Alignment index is out of bounds of the datasets index: %s"
             " n_elements %s" % (raster_align_index, n_rasters))
 
-    if compare_in_equal_earth and target_projection_wkt is None:
+    if comparison_projection_wkt and target_projection_wkt is None:
         raise ValueError(
-            "compare_in_equal_earth must be set to False if "
-            "target_projection_wkt is None")
+            "comparison_projection_wkt must be set to None if "
+            "target_projection_wkt is None.")
+    if target_projection_wkt and comparison_projection_wkt is None:
+        raise ValueError(
+            "comparison_projection_wkt must be defined if "
+            "target_projection_wkt is defined.")
 
     _assert_is_valid_pixel_size(target_pixel_size)
 
@@ -1007,15 +1026,15 @@ def align_and_resize_raster_stack(
         else:
             vector_info_list = []
 
-        equal_earth_ref = osr.SpatialReference(epsg=8857)  # Equal Earth
-        equal_earth_wkt = equal_earth_ref.ExportToWkt()
-
+        # create a list of bounding boxes of all the raster and vector inputs,
+        # transformed to the comparison projection (or left as-is if the
+        # comparison_projection_wkt is None)
         bounding_box_list = []
         for raster_index, raster_info in enumerate(raster_info_list):
             # this block calculates the base projection of ``raster_info`` if
             # ``target_projection_wkt`` is defined, thus implying a
             # reprojection will be necessary.
-            if target_projection_wkt:
+            if comparison_projection_wkt:
                 if base_projection_wkt_list and \
                         base_projection_wkt_list[raster_index]:
                     # a base is defined, use that
@@ -1029,49 +1048,35 @@ def align_and_resize_raster_stack(
                         raise ValueError(
                             "no projection for raster %s" %
                             base_raster_path_list[raster_index])
-                # since the base spatial reference is potentially different
-                # than the target, we need to transform the base bounding
-                # box into target coordinates so later we can calculate
-                # accurate bounding box overlaps in the target coordinate
-                # system
-                if compare_in_equal_earth:
-                    bounding_box_list.append(
-                        transform_bounding_box(
-                            raster_info['bounding_box'],
-                            base_raster_projection_wkt, equal_earth_wkt))
-                else:
-                    bounding_box_list.append(
-                        transform_bounding_box(
-                            raster_info['bounding_box'],
-                            base_raster_projection_wkt, target_projection_wkt))
+                # transform the bounding box from its source projection to the
+                # comparison projection, in which we'll calculate the
+                # intersection or union of all the bounding boxes
+                bounding_box_list.append(
+                    transform_bounding_box(
+                        raster_info['bounding_box'],
+                        base_raster_projection_wkt,
+                        comparison_projection_wkt))
             else:
                 bounding_box_list.append(raster_info['bounding_box'])
 
         for vector_info in vector_info_list:
-            # include the vector bounding box information to make a global list
-            # of target bounding boxes
-            if target_projection_wkt:
-                if compare_in_equal_earth:
-                    bounding_box_list.append(
-                        transform_bounding_box(
-                            vector_info['bounding_box'],
-                            vector_info['projection_wkt'],
-                            equal_earth_wkt))
-                else:
-                    bounding_box_list.append(
-                        transform_bounding_box(
-                            vector_info['bounding_box'],
-                            vector_info['projection_wkt'],
-                            target_projection_wkt))
+            if comparison_projection_wkt:
+                bounding_box_list.append(
+                    transform_bounding_box(
+                        vector_info['bounding_box'],
+                        vector_info['projection_wkt'],
+                        comparison_projection_wkt))
             else:
                 bounding_box_list.append(vector_info['bounding_box'])
 
         target_bounding_box = merge_bounding_box_list(
             bounding_box_list, bounding_box_mode)
-        if compare_in_equal_earth:
+        # if needed, transform the computed bounding box from the
+        # comparison projection to the final target projection
+        if comparison_projection_wkt:
             target_bounding_box = transform_bounding_box(
                 bounding_box=target_bounding_box,
-                base_projection_wkt=equal_earth_wkt,
+                base_projection_wkt=comparison_projection_wkt,
                 target_projection_wkt=target_projection_wkt)
 
     if mask_options:

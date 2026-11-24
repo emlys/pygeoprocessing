@@ -2304,7 +2304,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, target_raster_path_list,
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
-                raster_align_index=0, compare_in_equal_earth=False)
+                raster_align_index=0, comparison_projection_wkt=None)
         expected_message = 'must be the same length'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2315,7 +2315,7 @@ class TestGeoprocessing(unittest.TestCase):
                 base_raster_path_list, ['target_a.tif'],
                 resample_method_list,
                 100.0, bounding_box_mode,
-                raster_align_index=0, compare_in_equal_earth=False)
+                raster_align_index=0, comparison_projection_wkt=None)
         expected_message = 'target_pixel_size is not a tuple'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2327,7 +2327,7 @@ class TestGeoprocessing(unittest.TestCase):
                 resample_method_list,
                 [100.0, "ten"], bounding_box_mode,
                 raster_align_index=0,
-                compare_in_equal_earth=False)
+                comparison_projection_wkt=None)
         expected_message = 'Invalid value for `target_pixel_size`'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2339,7 +2339,7 @@ class TestGeoprocessing(unittest.TestCase):
                 resample_method_list,
                 [100.0, 100.0, 100.0], bounding_box_mode,
                 raster_align_index=0,
-                compare_in_equal_earth=False)
+                comparison_projection_wkt=None)
         expected_message = 'Invalid value for `target_pixel_size`'
         actual_message = str(cm.exception)
         self.assertIn(expected_message, actual_message)
@@ -2465,7 +2465,7 @@ class TestGeoprocessing(unittest.TestCase):
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
             raster_align_index=0,
-            compare_in_equal_earth=False)
+            comparison_projection_wkt=None)
 
         for raster_index in range(len(target_raster_path_list)):
             target_raster_info = pygeoprocessing.get_raster_info(
@@ -2516,7 +2516,7 @@ class TestGeoprocessing(unittest.TestCase):
             base_raster_path_list, target_raster_path_list,
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
-            compare_in_equal_earth=False,
+            comparison_projection_wkt=None,
             raster_align_index=0, base_vector_path_list=[single_pixel_path])
 
         expected_matrix = numpy.ones((1, 1), numpy.int16)
@@ -2654,7 +2654,7 @@ class TestGeoprocessing(unittest.TestCase):
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
             raster_align_index=0,
-            compare_in_equal_earth=False)
+            comparison_projection_wkt=None)
 
         # we expect this to be twice as big since second base raster has a
         # pixel size twice that of the first.
@@ -2710,7 +2710,7 @@ class TestGeoprocessing(unittest.TestCase):
             base_a_raster_info['pixel_size'],
             target_bbox,
             raster_align_index=0,
-            compare_in_equal_earth=False)
+            comparison_projection_wkt=None)
 
         # REGRESSION TEST: make sure this input variable is unmodified after
         # execution.
@@ -2744,7 +2744,7 @@ class TestGeoprocessing(unittest.TestCase):
             ['near'],
             (10, -10),
             [-10, -20, 20, 0],
-            compare_in_equal_earth=False)
+            comparison_projection_wkt=None)
             # this target bounding box extends beyond extent of input raster
             # (input raster's bbox is [0, -40, 40, 0])
 
@@ -4527,8 +4527,8 @@ class TestGeoprocessing(unittest.TestCase):
         pygeoprocessing.align_and_resize_raster_stack(
             [base_path], [target_path], ['near'],
             (3e4, -3e4), 'intersection',
-            target_projection_wkt=target_ref.ExportToWkt(),
-            compare_in_equal_earth=False)
+            comparison_projection_wkt=target_ref.ExportToWkt(),
+            target_projection_wkt=target_ref.ExportToWkt())
 
         target_raster_info = pygeoprocessing.get_raster_info(target_path)
 
@@ -4546,8 +4546,8 @@ class TestGeoprocessing(unittest.TestCase):
                 [target_raster_info['bounding_box'][0],
                  target_raster_info['bounding_box'][3]]), None)
 
-    def test_align_compare_in_equal_earth(self):
-        """PGP: align_and_resize_raster_stack with compare_in_equal_earth."""
+    def test_align_comparison_projection(self):
+        """PGP: align_and_resize_raster_stack with comparison projection."""
         driver = gdal.GetDriverByName("GTiff")
 
         workspace_dir = '/Users/emily/foo'
@@ -4571,15 +4571,14 @@ class TestGeoprocessing(unittest.TestCase):
 
         # Align a large WGS84 raster wrapping 180 degrees around the earth
         # to a small raster in a UTM zone projection. Without
-        # compare_in_equal_earth=True, this raises an error because the
-        # larger bounding box can't be directly reprojected into the
-        # target projection.
+        # comparison_projection_wkt left at its default setting, this
+        # raises an error because the larger bounding box can't be directly
+        # reprojected into the target projection.
         pygeoprocessing.align_and_resize_raster_stack(
             [base_path_a, base_path_b], [target_path_a, target_path_b],
             ['near', 'near'],
             (1000, -1000), 'intersection',
-            target_projection_wkt=target_ref.ExportToWkt(),
-            compare_in_equal_earth=True)
+            target_projection_wkt=target_ref.ExportToWkt())
 
         raster_info_a = pygeoprocessing.get_raster_info(target_path_a)
         raster_info_b = pygeoprocessing.get_raster_info(target_path_b)
@@ -4685,7 +4684,7 @@ class TestGeoprocessing(unittest.TestCase):
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
             raster_align_index=0,
-            compare_in_equal_earth=False,
+            comparison_projection_wkt=None,
             mask_options={
                 'mask_vector_path': dual_poly_path,
                 'mask_layer_name': 'dual_poly',
@@ -4704,7 +4703,7 @@ class TestGeoprocessing(unittest.TestCase):
             resample_method_list,
             base_a_raster_info['pixel_size'], bounding_box_mode,
             raster_align_index=0,
-            compare_in_equal_earth=False,
+            comparison_projection_wkt=None,
             mask_options={
                 'mask_vector_path': dual_poly_path,
                 'mask_layer_name': 'dual_poly',
@@ -4817,7 +4816,7 @@ class TestGeoprocessing(unittest.TestCase):
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
                 raster_align_index=0,
-                compare_in_equal_earth=False,
+                comparison_projection_wkt=None,
                 mask_options={
                     'mask_vector_path': dual_poly_path,
                     'mask_layer_name': 'dual_poly',
@@ -4832,7 +4831,7 @@ class TestGeoprocessing(unittest.TestCase):
                 resample_method_list,
                 base_a_raster_info['pixel_size'], bounding_box_mode,
                 raster_align_index=0,
-                compare_in_equal_earth=False,
+                comparison_projection_wkt=None,
                 mask_options={
                     'bad_mask_vector_path': dual_poly_path,
                     'mask_layer_name': 'dual_poly',
