@@ -4550,24 +4550,22 @@ class TestGeoprocessing(unittest.TestCase):
         """PGP: align_and_resize_raster_stack with comparison projection."""
         driver = gdal.GetDriverByName("GTiff")
 
-        workspace_dir = '/Users/emily/foo'
-
         wgs84_sr = osr.SpatialReference(epsg=4326)  # WGS84
-        base_path_a = os.path.join(workspace_dir, 'base_a.tif')
+        base_path_a = os.path.join(self.workspace_dir, 'base_a.tif')
         raster_a = driver.Create(base_path_a, 180, 80, 1, gdal.GDT_Int32)
         raster_a.SetProjection(wgs84_sr.ExportToWkt())
         raster_a.SetGeoTransform([-140, 1, 0, 0, 0, -1])
         raster_a.FlushCache()
 
         target_ref = osr.SpatialReference(epsg=32737)  # UTM Zone 37S
-        base_path_b = os.path.join(workspace_dir, 'base_b.tif')
+        base_path_b = os.path.join(self.workspace_dir, 'base_b.tif')
         raster_b = driver.Create(base_path_b, 10, 10, 1, gdal.GDT_Int32)
         raster_b.SetProjection(target_ref.ExportToWkt())
         raster_b.SetGeoTransform([500000, 1000, 0, 5000000, 0, -1000])
         raster_b.FlushCache()
 
-        target_path_a = os.path.join(workspace_dir, 'target_a2.tif')
-        target_path_b = os.path.join(workspace_dir, 'target_b2.tif')
+        target_path_a = os.path.join(self.workspace_dir, 'target_a2.tif')
+        target_path_b = os.path.join(self.workspace_dir, 'target_b2.tif')
 
         # Align a large WGS84 raster wrapping 180 degrees around the earth
         # to a small raster in a UTM zone projection. Without
